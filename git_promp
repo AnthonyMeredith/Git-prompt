@@ -1,0 +1,122 @@
+# Create function which will process Git repository information and append it
+# to the PS1 variable (as required) to give information about the workspace
+function do_on_ps1() {
+  local prompt='\n'
+
+  # Make sure git is available
+  [[ ! -x $(which git 2> /dev/null) ]] && return
+  # And that we're to show the prompt for the user
+  [[ "$(git config user.prompt)" =~ (enabled?|true) ]] || return
+  # If we cannot get information about the latest commit, we're not in a repo
+  local commit=$(git rev-parse HEAD 2> /dev/null)
+  [[ -z "${commit}" ]] && return
+
+  local git_status="$(git status --porcelain 2> /dev/null)"
+
+  local total_untracked=$(egrep -c '^\?\?' <<< "${git_status}")
+  local total_unstaged=$(egrep -c '^.[MAD]' <<< "${git_status}")
+  local total_staged=$(egrep -c '^[MAD]' <<< "${git_status}")
+
+  local total_modified_staged=$(egrep -c '^M' <<< "${git_status}")
+  local total_modified_unstaged=$(egrep -c '^.M' <<< "${git_status}")
+  local total_conflict=$(egrep -c '^U' <<< "${git_status}")
+
+  # These aren't currently used
+  # local total_deleted_unstaged=$(egrep -c '^.D' <<< "${git_status}")
+  # local total_deleted=$(egrep -c '^.?D' <<< "${git_status}")
+  # local total_nonconflit=$(egrep -c '^[^UM]' <<< "${git_status}")
+
+  local dot="$(git rev-parse --git-dir 2> /dev/null)"
+
+  local last_log="$(git log --pretty=oneline -n1 2> /dev/null | wc -l)"
+  if [[ ${last_log} -eq 0 ]]; then
+    prompt+='\e[90mlocal\e[0m \e[37m\e[0m '
+    if   [[ ${total_untracked}  -gt 0 ]]; then prompt+='\e[31m'
+    elif [[ ${total_unstaged}   -gt 0 ]]; then prompt+='\e[31m'
+    elif [[ ${total_staged}     -gt 0 ]]; then prompt+='\e[32m'
+    else                                       prompt+='\e[33m';  fi
+    prompt+='master\e[90m(\e[37m-------\e[90m)\e[0m '
+  else
+    local origin=$(git remote show -n origin 2> /dev/null \
+                       | awk '/Fetch URL/ { print $3 }' 2> /dev/null \
+                       | sed -e 's/^git@//g')
+    if [[ -n "${origin}" && "${origin}" != "origin" ]]; then
+      prompt+='\e[90m'${origin}'\e[0m'
+    else
+      origin=local
+      prompt+='\e[90mlocal\e[0m'
+    fi
+    prompt+=' '
+
+
+    # If we're in rebasing mode, then break out into a specific set of tags and
+    # icons, echo those and then exit before processing the rest
+    if [[ -d "${dot}/rebase-apply" ]]; then
+      if   [[ -f "${dot}/rebase-apply/rebasing" ]]; then
+        branch="$(cat "${dot}/rebase-apply/head-name")"
+        prompt+='\e[31m\e[0m \e[37mrebasing\e[0m \e[33m'${commit:0:7}'\e[0m \e[37monto \e[33m'${branch##*/}'\e[0m '
+        if [[ ${total_modified_staged}   -gt 0 ]]; then prompt+='\e[32m'; else prompt+='\e[37m'; fi; prompt+='\e[0m '
+        if [[ ${total_modified_unstaged} -gt 0 ]]; then prompt+='\e[33m'; else prompt+='\e[37m'; fi; prompt+='\e[0m '
+        if [[ ${total_conflict}          -gt 0 ]]; then prompt+='\e[31m'; else prompt+='\e[37m'; fi; prompt+='\e[0m '
+      else
+        prompt+='\e[31m\e[0m \e[37mrebasing patches onto \e[33m'${branch##*/}'\e[0m '
+      fi
+      echo -e "${prompt}"
+      return
+    fi
+
+    # TODO: Add settings for handling merging
+
+    local branch="$(git rev-parse --abbrev-ref HEAD 2> /dev/null)"
+
+    # If HEAD, we're detached, and if we've reached here, someting has gone wrong
+    if [[ "${branch}" == "HEAD" ]]; then
+      prompt+='\e[31m\e[0m \e[31merror\e[0m\e[37m: unknown error in processing\e[0m'
+      echo -e "${prompt}"
+      return
+    fi
+
+    # Standard standard displaying
+    prompt+='\e[37mBr\e[0m '
+    if   [[ ${total_untracked}  -gt 0 ]]; then prompt+='\e[31m'${branch}
+    elif [[ ${total_unstaged}   -gt 0 ]]; then prompt+='\e[31m'${branch}
+    elif [[ ${total_staged}     -gt 0 ]]; then prompt+='\e[92m'${branch}
+    else                                       prompt+='\e[32m'${branch};  fi
+    prompt+='\e[90m(\e[37m'${commit:0:7}
+    local tag=$(git describe --exact-match --tags ${commit} 2> /dev/null)
+    [[ -n "${tag}" ]] && prompt+=' \e[90mB\e[0m \e[90m'${tag}'\e[0m'
+    prompt+='\e[90m)\e[0m '
+
+    local upstream="$(git rev-parse --symbolic-full-name --abbrev-ref @{upstream} 2> /dev/null)"
+
+    if [[ -n "${upstream}" && "${upstream}" != "@{upstream}" ]]; then
+      local diff="$(git log --pretty=oneline --topo-order --left-right ${commit}...${upstream} 2> /dev/null)"
+      local ahead=$(grep -c "^<" <<< "${diff}")
+      local behind=$(grep -c "^>" <<< "${diff}")
+
+      if   [[ ${ahead}  -gt 0 && ${behind} -gt 0 ]]; then prompt+='\e[31mR\e[0m '
+      elif [[ ${behind} -gt 0 ]]; then                    prompt+='\e[33mR\e[0m '
+      elif [[ ${ahead}  -gt 0 ]]; then                    prompt+='\e[32mR\e[0m '
+      else                                                prompt+='\e[37mR\e[0m '
+      fi
+    fi
+  fi
+
+  # Run these here to reduce calls if not needed by above
+  local total_added=$(egrep -c '^A' <<< "${git_status}")
+  local total_deleted_staged=$(egrep -c '^D' <<< "${git_status}")
+
+  if [[ ${total_added}           -gt 0 ]]; then prompt+='\e[32m'; else prompt+='\e[37m'; fi; prompt+='A\e[0m '
+  if [[ ${total_modified_staged} -gt 0 ]]; then prompt+='\e[32m'; else prompt+='\e[37m'; fi; prompt+='M\e[0m '
+  if [[ ${total_deleted_staged}  -gt 0 ]]; then prompt+='\e[32m'; else prompt+='\e[37m'; fi; prompt+='D\e[0m '
+  if [[ ${total_unstaged}        -gt 0 ]]; then prompt+='\e[33m'; else prompt+='\e[37m'; fi; prompt+='S\e[0m '
+  if [[ ${total_untracked}       -gt 0 ]]; then prompt+='\e[31m'; else prompt+='\e[37m'; fi; prompt+='U\e[0m '
+
+  prompt+='\e[0m'
+
+  echo -e "${prompt}"
+
+}
+
+# Override prepent on the PS1
+PS1='$(do_on_ps1)\n'${PS1}
